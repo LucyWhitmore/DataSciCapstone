@@ -1,0 +1,317 @@
+---
+title: "Data Cleaning & Setup"
+author: "Lucy Whitmore"
+date: "1/25/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+
+library(nlme)
+
+library(broom)
+
+library(stringr)
+```
+
+# Import data, select for recommended inclusion, join
+```{r}
+datapath = "/Volumes/devbrainlab/ABCD_Data/ABCD5pt1/core/imaging/"
+#directory for saved data is "/Volumes/devbrainlab/
+
+# could filter the inclusion, then join by id & wave (drop other columns from inclusion)
+struc_include5<-rio::import(paste0(datapath, "mri_y_qc_incl.csv")) %>%
+  select(src_subject_id, eventname, imgincl_t1w_include) %>% 
+  #mutate(imgincl_t1w_include = as.numeric(imgincl_t1w_include)) %>% 
+  filter(imgincl_t1w_include == 1) 
+
+#qc_info5 <- rio::import("/Volumes/devbrainlab/ABCD_Data/ABCD5pt0/core/imaging/mri_y_qc_man_post_t2w.csv") %>%
+#  select(src_subject_id, eventname, imgincl_t1w_include)
+
+#Load structural data
+# Volume
+smri_vol <- rio::import(paste0(datapath,"mri_y_smr_vol_dsk.csv")) # %>%
+ # select(subjectkey, src_subject_id, interview_age, sex, eventname, matches("vol")) 
+# note: might just select all, don't need to match for volume anymore  
+
+# Area
+smri_area <- rio::import(paste0(datapath,"mri_y_smr_area_dsk.csv"))# %>%
+  #select(subjectkey, src_subject_id, interview_age, sex, eventname, matches("area")) 
+  
+# Thickness
+smri_thickness <- rio::import(paste0(datapath,"mri_y_smr_thk_dsk.csv")) #%>%
+  #select(subjectkey, src_subject_id, interview_age, sex, eventname, matches("thick"))
+ 
+# Subcortical Volume 
+smri_subvol <- rio::import(paste0(datapath,"mri_y_smr_vol_aseg.csv")) %>%
+  select(-c(smri_vol_scs_lesionlh, smri_vol_scs_lesionrh))
+ # select(subjectkey, src_subject_id, interview_age, sex, eventname, matches("vol"))
+
+# Scanner Info
+mri_info5 <- rio::import(paste0(datapath,"mri_y_adm_info.csv")) %>% 
+  select(src_subject_id, eventname, mri_info_deviceserialnumber) #, mri_info_manufacturer, mri_info_manufacturersmn)
+
+# Demographic Info (age)
+demo <- rio::import("/Volumes/devbrainlab/ABCD_Data/ABCD5pt0/core/abcd-general/abcd_y_lt.csv") %>% 
+  select(src_subject_id, eventname, interview_age, rel_family_id) %>% 
+  mutate(interview_age = interview_age/12)
+```
+
+
+# Filter for usable data
+```{r}
+# Cortical Volume
+# join cortical and subcortical smri
+good_mri_vol <- left_join(struc_include5, smri_vol, by = c("src_subject_id", "eventname"))
+good_mri_vol <- left_join(good_mri_vol, mri_info5, by = c("src_subject_id", "eventname")) %>% 
+  mutate(src_subject_id = as.factor(src_subject_id),
+         eventname = as.factor(eventname), 
+         mri_info_deviceserialnumber = as.factor(mri_info_deviceserialnumber)) %>% 
+  select(-imgincl_t1w_include)
+
+volume <- left_join(good_mri_vol, demo, c("src_subject_id", "eventname"))
+#need to decide whether to bind volume and subcortical volume before combat
+
+# Subcortical Volume
+good_mri_subvol <- left_join(struc_include5, smri_subvol, by = c("src_subject_id", "eventname"))
+good_mri_subvol <- left_join(good_mri_subvol, mri_info5, by = c("src_subject_id", "eventname")) %>% 
+  mutate(src_subject_id = as.factor(src_subject_id),
+         eventname = as.factor(eventname), 
+         mri_info_deviceserialnumber = as.factor(mri_info_deviceserialnumber)) %>% 
+  select(-imgincl_t1w_include)
+
+subvolume <- left_join(good_mri_subvol, demo, c("src_subject_id", "eventname")) %>% 
+  select(-c(smri_vol_scs_wmhintlh, smri_vol_scs_wmhintrh))
+
+
+# Cortical Area
+good_mri_area <- left_join(struc_include5, smri_area, by = c("src_subject_id", "eventname"))
+good_mri_area <- left_join(good_mri_area, mri_info5, by = c("src_subject_id", "eventname"))%>% 
+  mutate(src_subject_id = as.factor(src_subject_id),
+         eventname = as.factor(eventname), 
+         mri_info_deviceserialnumber = as.factor(mri_info_deviceserialnumber)) %>% 
+  select(-imgincl_t1w_include)
+
+area <- left_join(good_mri_area, demo, c("src_subject_id", "eventname"))
+```
+
+Join all measures and save
+```{r}
+# merge back into one dataframe that can be passed into model training
+all_mri <- left_join(area, volume, by = c('src_subject_id', 'eventname','mri_info_deviceserialnumber', 'rel_family_id', 'interview_age'))
+all_mri <- left_join(all_mri, subvolume, by = c('src_subject_id', 'eventname','mri_info_deviceserialnumber', 'rel_family_id', 'interview_age')) %>% 
+  relocate(c('interview_age', 'rel_family_id', 'mri_info_deviceserialnumber'), .before=smri_area_cdk_banksstslh)
+
+save(all_mri, file="all_mri.Rda")
+
+#rm(list=setdiff(ls(), "all_mri"))
+
+```
+
+
+
+## Import Data
+```{r}
+
+all_mri <- rio::import("/Volumes/devbrainlab/Lucy/BrainAGE/ChangeScoresCapstone/all_mri.Rda")
+
+```
+
+# Cleaning/Prep
+```{r}
+# split by wave
+# probably keep subject id at least
+# (join by that later)
+mri_baseline <- all_mri %>% 
+  filter(eventname == "baseline_year_1_arm_1")  %>% 
+  select(-c(mri_info_deviceserialnumber)) #src_subject_id, eventname, 
+
+#head(mri_baseline %>% select(c(interview_age, interview_age.x, interview_age.y)))
+
+mri_followup_y2 <- all_mri %>% 
+  filter(eventname == "2_year_follow_up_y_arm_1")  %>% 
+  select(-c(mri_info_deviceserialnumber, rel_family_id))  #src_subject_id, eventname, 
+
+mri_followup_y4 <- all_mri %>% 
+  filter(eventname == "4_year_follow_up_y_arm_1")  %>% 
+  select(-c(mri_info_deviceserialnumber, rel_family_id)) #src_subject_id, eventname, 
+
+
+```
+
+## Calculate difference scores
+
+Annualized change approach
+```{r}
+# Join data
+smri_difference_baseline_y2 <- left_join(mri_baseline, mri_followup_y2, by =c("src_subject_id"))
+
+smri_difference_y2_y4 <- left_join(mri_followup_y2, mri_followup_y4, by =c("src_subject_id"))
+
+# Calculate Change
+smri_difference_baseline_y2_calc <- smri_difference_baseline_y2 %>%
+ select(-c(eventname.x,eventname.y, rel_family_id)) %>% 
+ mutate(across(ends_with(".y"), .names = "{col}_diff") - across(ends_with(".x"))) %>%
+# rename_with(~ sub("_\\d+", "", .), ends_with("_diff"))# %>%  #removes numeric suffixes 
+  rename_with(~ sub("\\.y_diff$", "_diff", .), ends_with(".y_diff")) %>% 
+  select(-contains(c('.x', '.y')))
+
+smri_difference_y2_y4_calc <- smri_difference_y2_y4 %>%
+ select(-c(eventname.x,eventname.y)) %>% 
+ mutate(across(ends_with(".y"), .names = "{col}_diff") - across(ends_with(".x"))) %>%
+ rename_with(~ sub("\\.y_diff$", "_diff", .), ends_with(".y_diff")) %>% 
+ select(-contains(c('.x', '.y')))
+
+
+#divide all brain columns by change in interview age
+# this gets us per year change (not a %, but numeric change per year)
+
+# Baseline - Year 2
+smri_difference_baseline_y2_scaled <- smri_difference_baseline_y2_calc # for some reason have to duplicate or can't have first two columns
+smri_difference_baseline_y2_scaled[, -(1:2)] <- sweep(smri_difference_baseline_y2_scaled[, -(1:2)], 1, smri_difference_baseline_y2_scaled [, 2], "/")
+
+smri_difference_baseline_y2_scaled <- smri_difference_baseline_y2_scaled %>% 
+  filter(!is.na(interview_age_diff))
+
+# at some point, want to reattach outcome age, but need to decide what that should be, probably T2 age
+smri_difference_baseline_y2_scaled <- left_join(smri_difference_baseline_y2_scaled, mri_followup_y2 %>% select(c("src_subject_id", "interview_age")), by="src_subject_id")
+
+smri_difference_baseline_y2_scaled <- left_join(smri_difference_baseline_y2_scaled, mri_baseline %>% select(c("src_subject_id", "rel_family_id")), by="src_subject_id") %>% 
+  relocate(c('interview_age', 'rel_family_id'), .before=interview_age_diff)
+
+
+# Year 2 - Year 4
+smri_difference_y2_y4_scaled <- smri_difference_y2_y4_calc # for some reason have to duplicate or can't have first two columns
+smri_difference_y2_y4_scaled[, -(1:2)] <- sweep(smri_difference_y2_y4_scaled[, -(1:2)], 1, smri_difference_y2_y4_scaled[, 2], "/")
+
+smri_difference_y2_y4_scaled <- smri_difference_y2_y4_scaled %>% 
+  filter(!is.na(interview_age_diff))
+
+
+# attach family ID and outcome age
+smri_difference_y2_y4_scaled <- left_join(smri_difference_y2_y4_scaled, mri_followup_y4 %>% select(c("src_subject_id", "interview_age")), by="src_subject_id")
+
+smri_difference_y2_y4_scaled <- left_join(smri_difference_y2_y4_scaled, mri_baseline %>% select(c("src_subject_id", "rel_family_id")), by="src_subject_id") %>% 
+  relocate(c('interview_age', 'rel_family_id'), .before=interview_age_diff)
+
+
+
+
+save(smri_difference_baseline_y2_scaled, file="smri_difference_baseline_y2_scaled.Rda")
+save(smri_difference_y2_y4_scaled, file="smri_difference_y2_y4_scaled.Rda")
+```
+
+
+Random slope approach
+```{r}
+# run models in a loop, extract a random slope for each brain region
+# limitation: have to have all 3 waves
+
+#https://github.com/abcdworkshop/lmmtutorialtrack1/blob/main/track1mlmtutorial.Rmd
+
+# make subject id a factor
+all_mri <- all_mri %>% 
+  mutate(src_subject_id = as.factor(src_subject_id))
+
+# limit to only those with data at all 3 waves
+slope_count <- all_mri %>% count(src_subject_id) %>% filter(n >= 3)
+
+all_mri_filtered <- all_mri %>% 
+  filter(src_subject_id %in% slope_count$src_subject_id)
+
+
+## Run lme in a for loop
+ranef_df <- data.frame(src_subject_id = unique(all_mri_filtered$src_subject_id))
+
+
+# Loop over each column in the dataframe (excluding the first 5 columns)
+  for (col in names(all_mri_filtered)[6:length(all_mri_filtered)]) {
+#for (col in names(all_mri_filtered)[6:25]) {
+    print(col)
+   # exampleFormula = paste0(col, fixed_part)
+  # Fit the linear mixed-effects model for the current column
+  fm = lme(as.formula(paste0(col, " ~ interview_age")), method='ML', control =list(msMaxIter = 1000, msMaxEval = 1000, sing.tol=1e-20), random = ~1+interview_age|src_subject_id, data=all_mri_filtered)
+  
+  # Extract the random effects for each subject
+  ranef_values <- ranef(fm)[2]  # Extracting the second column from ranef
+  
+  # Add the random effects to the dataframe
+  ranef_df[[col]] <- ranef_values
+}
+
+
+
+# convert to regular dataframe
+ranef_df_numeric <- as.data.frame(sapply(ranef_df[2:length(ranef_df)] , unlist ))
+
+# add IDs
+ranef_df_numeric$src_subject_id = slope_count$src_subject_id 
+
+ranef_df_numeric  <- ranef_df_numeric  %>%
+  select(src_subject_id, everything())
+
+#renumber rows
+row.names(ranef_df_numeric ) <- 1:nrow(ranef_df_numeric)
+
+# add interview age, family ID
+slopes_df <- left_join(ranef_df_numeric, all_mri %>% filter(eventname == "4_year_follow_up_y_arm_1") %>% select(c("src_subject_id", "interview_age")), by="src_subject_id")
+
+slopes_df <- left_join(slopes_df, all_mri %>% filter(eventname == "baseline_year_1_arm_1") %>% select(c("src_subject_id", "rel_family_id")), by="src_subject_id")
+
+slopes_df  <- slopes_df  %>%
+  select(src_subject_id, interview_age, rel_family_id, everything())
+
+
+save(slopes_df, file="slopes_df.Rda")
+
+```
+
+check for sample size of annualized change vs random slope approach
+```{r}
+# Subtraction method
+nrow(smri_difference_baseline_y2_scaled)
+nrow(smri_difference_y2_y4_scaled)
+
+# Change score
+nrow(ranef_df)
+```
+
+## Limit to same participants in both data sets
+```{r}
+# filter annualized change for IDs in random slope
+smri_difference_baseline_y2_scaled %>% 
+  filter(src_subject_id %in% ranef_df$src_subject_id)
+
+
+smri_difference_y2_y4_scaled %>% 
+  filter(src_subject_id %in% ranef_df$src_subject_id)
+
+```
+
+## Split for train/test
+```{r}
+# set seed
+# make sure siblings are put into same split
+# need to import family info
+
+# check to see what max number of people per group is
+
+ranef_df %>% group_by(rel_family_id) %>% mutate(count = n())
+# probably graph distribution
+
+set.seed()
+
+ranef_split <- group_initial_split(
+  ranef_df,
+  group = rel_family_id,
+  prop = 0.80,
+  # matching age distributions across train and test set
+  strata = "interview_age"
+)
+
+ranef_train <- training(ranef_split)
+ranef_validation <- testing(ranef_split)
+```

@@ -1,0 +1,309 @@
+---
+title: "Model Training"
+author: "Lucy Whitmore"
+date: "2/12/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+packages <-  c("tidyverse",
+               "ggpubr", "tidymodels", "xgboost")
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))  
+}
+lapply(packages, library, character.only = TRUE)
+```
+
+### SETUP ###
+
+# Load data
+```{r}
+brain_data <- rio::import("brain_data.Rda")
+```
+
+# Split into train/test
+```{r}
+# Initial data preparation
+
+require(caret)
+require(recipes)
+
+set.seed(10152021)  # for reproducibility
+
+# Train/Test Split
+  
+loc      <- sample(1:nrow(brain_data), round(nrow(brain_data) * 0.8))
+brain_tr  <- brain_data[loc, ]
+brain_te  <- brain_data[-loc, ]
+
+```
+
+## Blueprint 
+```{r}
+require(recipes)
+
+blueprint <- recipe(x     = brain_data,
+                    vars  = colnames(brain_data),
+                    roles = c('outcome',rep('predictor',172))) %>%  # change this
+             step_zv(all_numeric()) %>%
+             step_nzv(all_numeric()) %>%
+             step_normalize(all_numeric_predictors())
+
+```
+
+## Cross-Validation
+```{r}
+set.seed(10152021)  # for reproducibility
+# Randomly shuffle the data
+    brain_tr = brain_tr[sample(nrow(brain_tr)),]
+
+# Create 10 folds with equal size
+    folds = cut(seq(1,nrow(brain_tr)),breaks=10,labels=FALSE)
+  
+# Create the list for each fold 
+    my.indices <- vector('list',10)
+    for(i in 1:10){
+        my.indices[[i]] <- which(folds!=i)
+    }
+      
+cv <- trainControl(method = "cv",
+                   index  = my.indices)
+```
+
+### Model Training - Elastic Net ###
+
+```{r}
+# Create the tuning grid
+
+grid <- expand.grid(alpha = seq(0,1,.01), lambda = seq(0.001,0.5,.005)) 
+  
+grid
+```
+
+```{r}
+# Train model
+elastic <- caret::train(blueprint, 
+                        data      = brain_data, 
+                        method    = "glmnet", 
+                        trControl = cv,
+                        tuneGrid  = grid)
+```
+
+
+```{r}
+# Check hyperparameters & feature importance
+coefs <- coef(elastic$finalModel,elastic$bestTune$lambda)
+coefs
+
+require(vip)
+
+vip(elastic, 
+    num_features = 10, 
+    geom = "point") + 
+theme_bw()
+```
+
+```{r}
+# Predict on new data & evaluate performance
+predict_te_elastic <- predict(elastic, read_te)
+predict_te_elastic
+
+# Performance
+rsq_te <- cor(read_te$target,predict_te_elastic)^2
+rsq_te
+
+mae_te <- mean(abs(read_te$target - predict_te_elastic))
+mae_te
+
+rmse_te <- sqrt(mean((read_te$target - predict_te_elastic)^2))
+rmse_te
+```
+
+```{r}
+# save elastic net model
+```
+
+### Model Training - Extreme Gradient Boosting ###
+
+```{r}
+# Model prep: split, preprocessing, CV ------------------------------------
+
+# Train / test split ------------------------------------------------------
+set.seed(42)
+df_split <- initial_split(
+  model2_features_noid, 
+  prop = 0.80,
+  # matching age distributions across train and test set
+  strata = "interview_age"
+)
+df_train <- training(df_split)
+df_validation <- testing(df_split)
+```
+
+
+# Pre-processing setup ----------------------------------------------------
+
+```{r}
+# define (what we want to do)
+preprocess_recipe <- df_train %>%
+  # predict scan age by all brain features
+  recipe(interview_age ~ .) %>%
+  # remove near zero variance predictors
+  step_nzv(all_predictors()) %>%
+  prep() # where it all gets calculated
+
+preprocess_recipe
+
+
+# Apply pre-processing ----------------------------------------------------
+
+# juice() will work with training data, `bake()` to apply this to our test data
+
+# apply on train (gives processed value)
+df_train_prep <- juice(preprocess_recipe)
+
+# apply on validation
+df_validation_prep <- preprocess_recipe %>% bake(df_validation)
+
+```
+
+
+```{r}
+boost_mod_test <- boost_tree(
+  mode = "regression", 
+  trees = 150,  # other tutorial has 1000
+  tree_depth = tune(), min_n = tune(), loss_reduction = tune(),
+  # randomness
+  sample_size = tune(), mtry = tune(), 
+  # step size
+  learn_rate = tune()
+) %>%
+  set_engine("xgboost", 
+             objective = "reg:squarederror")
+
+```
+
+
+```{r}
+set.seed(42)
+
+xgboost_grid_test <- grid_latin_hypercube(
+  min_n(), 
+  tree_depth(), 
+  loss_reduction(),
+  sample_size = sample_prop(),
+  # has unknown, finalize with data to find max
+  finalize(mtry(), df_train_prep),
+  learn_rate(),
+  size = 500   # other tutorial has 30
+)
+
+xgboost_grid_test
+```
+
+```{r}
+xgb_wf <- workflow() %>%
+  add_formula(interview_age ~ .) %>%
+  add_model(boost_mod_test)
+
+xgb_wf
+
+```
+
+```{r}
+set.seed(42)
+
+train_cv <- df_train_prep %>%
+  vfold_cv(
+    v = 10, 
+    repeats = 10, 
+    strata = interview_age
+  )
+
+
+# other option from tutorial: 
+# vb_folds <- vfold_cv(vb_train, strata = win)
+#vb_folds
+```
+
+```{r}
+doParallel::registerDoParallel()
+
+set.seed(42)
+
+xgb_tuned_results_test <- tune_grid(
+  xgb_wf,
+  resamples = train_cv,
+  grid = xgboost_grid_test,
+  metrics = metric_set(mae, rmse, rsq),
+  control = control_grid(verbose = TRUE,
+                         save_pred = TRUE)
+)
+
+xgb_tuned_results_test
+```
+
+Check metrics
+```{r}
+xgb_tuned_results_test %>%
+  collect_metrics() %>%
+  filter(.metric == "roc_auc") %>%
+  select(mean, mtry:sample_size) %>%
+  pivot_longer(mtry:sample_size,
+               values_to = "value",
+               names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "AUC")
+
+
+
+
+show_best(xgb_res, "roc_auc")
+
+show_best(xgb_res, "mae")
+
+
+best_auc <- select_best(xgb_res, "roc_auc")
+best_auc
+
+best_mae <- select_best(xgb_res, "mae")
+best_mae
+
+# Other option:
+# select parsimonious params within one SE of best model
+best_xgb_params <- xgb_tuned_results_test %>%
+  select_by_one_std_err(metric = "mae", maximize = FALSE, tree_depth) 
+```
+
+Finalize parameters
+```{r}
+final_xgb <- finalize_workflow(
+  xgb_wf,
+  best_auc
+)
+
+final_xgb
+
+
+fit_workflow<- fit(final_xgb, df_train_prep)
+
+
+# check importance 
+final_xgb %>%
+  fit(data = df_train_prep) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point") 
+```
+
+
+```{r}
+
+final_res <- last_fit(final_xgb, vb_split)
+
+collect_metrics(final_res)
+```
