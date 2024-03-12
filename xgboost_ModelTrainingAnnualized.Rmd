@@ -1,0 +1,254 @@
+---
+title: "XGBoost Training - Annualized Change"
+author: "Lucy Whitmore"
+date: "2/29/2024"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+packages <-  c("tidyverse",
+               "ggpubr", "tidymodels", "xgboost", "caret")
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))  
+}
+lapply(packages, library, character.only = TRUE)
+```
+
+# Load data
+```{r}
+#annualized <- rio::import("/Volumes/devbrainlab/Lucy/BrainAGE/ChangeScoresCapstone/annualized_df.Rda") %>% 
+#  select(-c("src_subject_id", "rel_family_id"))
+
+annualized_train <- rio::import("/Volumes/devbrainlab/Lucy/BrainAGE/ChangeScoresCapstone/annualized_train.Rda") 
+
+annualized_test <- rio::import("/Volumes/devbrainlab/Lucy/BrainAGE/ChangeScoresCapstone/annualized_test.Rda") 
+```
+ 
+### Model Training - Extreme Gradient Boosting ###
+
+
+# Pre-processing setup ----------------------------------------------------
+
+```{r}
+# define (what we want to do)
+preprocess_recipe <- annualized_train %>%
+  # predict scan age by all brain features
+  recipe(interview_age_y4 ~ .) %>%
+  # update family ID role
+  update_role(rel_family_id, new_role = "family split variable") %>% 
+  update_role(src_subject_id, new_role = "ID") %>% 
+
+  # remove near zero variance predictors
+  step_zv(all_numeric()) %>%
+  step_nzv(all_predictors()) %>%
+  prep() # where it all gets calculated
+
+preprocess_recipe
+
+
+# Apply pre-processing ----------------------------------------------------
+
+# juice() will work with training data, `bake()` to apply this to our test data
+
+# apply on train (gives processed value)
+annualized_train_prep <- juice(preprocess_recipe)
+
+# apply on validation
+annualized_test_prep <- preprocess_recipe %>% bake(annualized_test)
+
+```
+
+
+```{r}
+boost_mod_test <- boost_tree(
+  mode = "regression", 
+  trees = 150,  # other tutorial has 1000
+  tree_depth = tune(), min_n = tune(), loss_reduction = tune(),
+  # randomness
+  sample_size = tune(), mtry = tune(), 
+  # step size
+  learn_rate = tune()
+) %>%
+  set_engine("xgboost", 
+             objective = "reg:squarederror")
+
+```
+
+
+```{r}
+set.seed(42)
+
+xgboost_grid_test <- grid_latin_hypercube(
+  min_n(), 
+  tree_depth(), 
+  loss_reduction(),
+  sample_size = sample_prop(),
+  # has unknown, finalize with data to find max
+  finalize(mtry(), annualized_train_prep),
+  learn_rate(),
+  size = 500   # other tutorial has 30
+)
+
+xgboost_grid_test
+```
+
+```{r}
+xgb_wf_annualized <- workflow() %>%
+  add_formula(interview_age_y4 ~ . - src_subject_id - rel_family_id) %>%
+  add_model(boost_mod_test)
+
+xgb_wf_annualized
+
+```
+
+```{r}
+set.seed(42)
+
+train_cv_annualized <- annualized_train_prep %>%
+  group_vfold_cv(
+    v = 10, 
+    repeats = 10, 
+    balance = "observations",
+   # strata = "interview_age",
+    group = rel_family_id
+  )
+
+
+# other option from tutorial: 
+# vb_folds <- vfold_cv(vb_train, strata = win)
+#vb_folds
+```
+
+```{r}
+doParallel::registerDoParallel()
+
+set.seed(42)
+
+xgb_tuned_results_annualized <- tune_grid(
+  xgb_wf_annualized,
+  resamples = train_cv_annualized,
+  grid = xgboost_grid_test,
+  metrics = metric_set(mae, rmse, rsq),
+  control = control_grid(verbose = TRUE,
+                         save_pred = TRUE)
+)
+
+xgb_tuned_results_annualized
+```
+
+Check metrics
+```{r}
+xgb_tuned_results_annualized %>%
+  collect_metrics() %>%
+  filter(.metric == "mae") %>%
+  select(mean, mtry:sample_size) %>%
+  pivot_longer(mtry:sample_size,
+               values_to = "value",
+               names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "MAE")
+
+
+show_best(xgb_tuned_results_annualized, "mae")
+
+
+best_mae_annualized <- select_best(xgb_tuned_results_annualized, "mae")
+best_mae_annualized
+
+# Other option:
+# select parsimonious params within one SE of best model
+best_xgb_params_annualized <- xgb_tuned_results_annualized %>%
+  select_by_one_std_err(metric = "mae", maximize = FALSE, tree_depth) 
+
+best_xgb_params_rmse_annualized <- xgb_tuned_results_annualized %>%
+  select_by_one_std_err(metric = "rmse", maximize = FALSE, tree_depth) 
+
+best_xgb_params_rsq_annualized <- xgb_tuned_results_annualized %>%
+  select_by_one_std_err(metric = "rsq", maximize = FALSE, tree_depth) 
+```
+
+Finalize parameters
+```{r}
+final_xgb_annualized <- finalize_workflow(
+  xgb_wf_annualized,
+  best_mae_annualized
+)
+
+final_xgb_annualized
+
+
+fit_workflow_annualized<- fit(final_xgb_annualized, annualized_train_prep)
+
+
+# check importance 
+final_xgb_annualized %>%
+  fit(data = annualized_train_prep) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point") 
+```
+
+
+```{r}
+
+#final_res <- last_fit(final_xgb_slopes, slopes_split)
+
+#collect_metrics(final_res)
+```
+
+```{r}
+# three different save formats just in case
+# 1. Rds
+save(fit_workflow_annualized, file = "fit_workflow_annualized.rds")
+# 2. rda
+save(fit_workflow_annualized, file = "fit_workflow_annualized.rda")
+# 3. raw xbg object, which can then be loaded with xgb.load
+annualized_model_obj<- fit_workflow_annualized$fit$fit$fit
+xgb.save(annualized_model_obj, "annualized_model_obj")
+
+
+save(final_xgb_annualized, file = "final_xgb_annualized.rds")
+
+
+save(xgb_tuned_results_annualized, file="xgb_tuned_results_annualized.Rda")
+
+```
+
+
+## After loading back
+```{r}
+
+extract_fit_parsnip(fit_workflow_annualized)
+
+
+extract_spec_parsnip(fit_workflow_annualized)
+
+
+collect_metrics(fit_workflow_annualized)
+
+
+xgb_tuned_results_annualized %>%
+  collect_metrics()
+
+vip(fit_workflow_annualized)
+
+show_best(xgb_tuned_results_annualized, "mae")
+
+xgb_annualized <- rio::import("xgb_annualized.rds")
+# needed to load into R and then resave using saveRDS
+
+xgb_annualized %>%
+  fit(data = annualized_train_prep) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point") 
+
+# use this
+vi_annualized <- vi(fit_workflow_annualized)
+
+
+save(vi_annualized, file = "vi_annualized.csv")
+
+```

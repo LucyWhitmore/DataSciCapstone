@@ -1,0 +1,145 @@
+---
+title: "Model Training"
+author: "Lucy Whitmore"
+date: "2/12/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+packages <-  c("tidyverse",
+               "ggpubr", "tidymodels", "xgboost", "caret")
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))  
+}
+lapply(packages, library, character.only = TRUE)
+```
+
+### SETUP ###
+
+# Load data
+```{r}
+annualized_change <- rio::import("/Volumes/devbrainlab/Lucy/BrainAGE/ChangeScoresCapstone/annualized_change.Rda") #%>% 
+#  select(-c("src_subject_id", "rel_family_id"))
+
+annualized_train <- rio::import("/Volumes/devbrainlab/Lucy/BrainAGE/ChangeScoresCapstone/annualized_train.Rda")# %>% 
+ # select(-c("src_subject_id", "rel_family_id"))
+
+annualized_test <- rio::import("/Volumes/devbrainlab/Lucy/BrainAGE/ChangeScoresCapstone/annualized_test.Rda")# %>% 
+  #select(-c("src_subject_id", "rel_family_id"))
+
+
+```
+
+# Train/test split done in preprocessing
+
+## Blueprint 
+```{r}
+
+
+blueprint_annualized <- recipe(x     =  annualized_change,
+                    vars  = colnames(annualized_change),
+                    roles = c('ID', 'split group', 'outcome', rep('predictor',368))) %>%  # change this
+             step_zv(all_numeric()) %>%
+             step_nzv(all_numeric()) %>%
+             step_normalize(all_numeric_predictors())
+
+```
+
+## Cross-Validation
+```{r}
+set.seed(10152021)  # for reproducibility
+# Randomly shuffle the data
+    annualized_train = annualized_train[sample(nrow(annualized_train)),]
+
+# Create 10 folds with equal size
+    
+    folds = cut(seq(1,nrow(annualized_train %>% group_by(rel_family_id))),breaks=10,labels=FALSE)
+  
+# Create the list for each fold 
+    my.indices <- vector('list',10)
+    for(i in 1:10){
+        my.indices[[i]] <- which(folds!=i)
+    }
+      
+cv_annualized <- trainControl(method = "cv",
+                  index  = my.indices)
+```
+
+## Cross-Validation, grouped by Family ID
+```{r}
+
+set.seed(42)
+
+cv_annualized <- annualized_train %>%
+  group_vfold_cv(
+    v = 10, 
+   # repeats = 10, 
+    balance = "observations",
+   # strata = "interview_age",
+    group = rel_family_id
+  )
+
+
+cv_annualized <- trainControl(cv_annualized)
+```
+
+### Model Training - Elastic Net ###
+
+```{r}
+# Create the tuning grid
+
+grid <- expand.grid(alpha = seq(0,1,.01), lambda = seq(0.001,0.5,.005)) 
+  
+grid
+```
+
+```{r}
+# Train model
+elastic_annualized <- caret::train(blueprint_annualized, 
+                        data      = annualized_train, 
+                        method    = "glmnet", 
+                        trControl = cv_annualized,
+                        tuneGrid  = grid)
+```
+
+
+```{r}
+# Check hyperparameters & feature importance
+coefs <- coef(elastic_annualized$finalModel,elastic_annualized$bestTune$lambda)
+coefs
+
+require(vip)
+
+vip(elastic_annualized, 
+    num_features = 10, 
+    geom = "point") + 
+theme_bw()
+```
+
+```{r}
+# Predict on new data & evaluate performance
+predict_te_elastic_annualized <- predict(elastic_annualized, annualized_test)
+predict_te_elastic_annualized
+
+annualized_pred_elastic <- cbind(annualized_test$interview_age,predict_te_elastic_annualized)
+
+
+# Performance
+rsq_te <- cor(annualized_test$interview_age,predict_te_elastic_annualized)^2
+rsq_te
+
+mae_te <- mean(abs(annualized_test$interview_age - predict_te_elastic_annualized))
+mae_te
+
+rmse_te <- sqrt(mean((annualized_test$interview_age - predict_te_elastic_annualized)^2))
+rmse_te
+```
+
+```{r}
+# save elastic net model
+save(elastic_annualized, file = "elastic_annualized.Rdata")
+
+save(annualized_pred_elastic, file = "annualized_pred_elastic.Rda")
+```

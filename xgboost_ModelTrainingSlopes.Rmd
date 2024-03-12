@@ -1,0 +1,223 @@
+---
+title: "XGBoost Training"
+author: "Lucy Whitmore"
+date: "2/19/2024"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+packages <-  c("tidyverse",
+               "ggpubr", "tidymodels", "xgboost", "caret")
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))  
+}
+lapply(packages, library, character.only = TRUE)
+```
+
+# Load data
+```{r}
+slopes <- rio::import("/Volumes/devbrainlab/Lucy/BrainAGE/ChangeScoresCapstone/slopes_df.Rda")# %>% 
+#  select(-c("src_subject_id", "rel_family_id"))
+
+slopes_train <- rio::import("/Volumes/devbrainlab/Lucy/BrainAGE/ChangeScoresCapstone/slopes_train.Rda") #%>% 
+ # select(-c("src_subject_id", "rel_family_id"))
+
+slopes_test <- rio::import("/Volumes/devbrainlab/Lucy/BrainAGE/ChangeScoresCapstone/slopes_test.Rda") #%>% 
+ # select(-c("src_subject_id", "rel_family_id"))
+```
+ 
+### Model Training - Extreme Gradient Boosting ###
+
+
+# Pre-processing setup ----------------------------------------------------
+
+```{r}
+# define (what we want to do)
+preprocess_recipe <- slopes_train %>%
+  # predict scan age by all brain features
+  recipe(interview_age ~ .) %>%
+  # update family ID role
+  update_role(rel_family_id, new_role = "family split variable") %>% 
+  update_role(src_subject_id, new_role = "ID") %>% 
+
+  # remove near zero variance predictors
+  step_zv(all_numeric()) %>%
+  step_nzv(all_predictors()) %>%
+  prep() # where it all gets calculated
+
+preprocess_recipe
+
+
+# Apply pre-processing ----------------------------------------------------
+
+# juice() will work with training data, `bake()` to apply this to our test data
+
+# apply on train (gives processed value)
+slopes_train_prep <- juice(preprocess_recipe)
+
+# apply on validation
+slopes_test_prep <- preprocess_recipe %>% bake(slopes_test)
+
+```
+
+
+```{r}
+boost_mod_test <- boost_tree(
+  mode = "regression", 
+  trees = 150,  # other tutorial has 1000
+  tree_depth = tune(), min_n = tune(), loss_reduction = tune(),
+  # randomness
+  sample_size = tune(), mtry = tune(), 
+  # step size
+  learn_rate = tune()
+) %>%
+  set_engine("xgboost", 
+             objective = "reg:squarederror")
+
+```
+
+
+```{r}
+set.seed(42)
+
+xgboost_grid_test <- grid_latin_hypercube(
+  min_n(), 
+  tree_depth(), 
+  loss_reduction(),
+  sample_size = sample_prop(),
+  # has unknown, finalize with data to find max
+  finalize(mtry(), slopes_train_prep),
+  learn_rate(),
+  size = 500   # other tutorial has 30
+)
+
+xgboost_grid_test
+```
+
+```{r}
+xgb_wf_slopes <- workflow() %>%
+  add_formula(interview_age ~ . - src_subject_id - rel_family_id) %>%
+  add_model(boost_mod_test)
+
+xgb_wf_slopes
+
+```
+
+```{r}
+set.seed(42)
+
+train_cv_slopes <- slopes_train_prep %>%
+  group_vfold_cv(
+    v = 10, 
+    repeats = 10, 
+    balance = "observations",
+   # strata = "interview_age",
+    group = rel_family_id
+  )
+
+
+# other option from tutorial: 
+# vb_folds <- vfold_cv(vb_train, strata = win)
+#vb_folds
+```
+
+```{r}
+doParallel::registerDoParallel()
+
+set.seed(42)
+
+xgb_tuned_results_test <- tune_grid(
+  xgb_wf_slopes,
+  resamples = train_cv_slopes,
+  grid = xgboost_grid_test,
+  metrics = metric_set(mae, rmse, rsq),
+  control = control_grid(verbose = TRUE,
+                         save_pred = TRUE)
+)
+
+xgb_tuned_results_test
+```
+
+Check metrics
+```{r}
+xgb_tuned_results_test %>%
+  collect_metrics() %>%
+  filter(.metric == "mae") %>%
+  select(mean, mtry:sample_size) %>%
+  pivot_longer(mtry:sample_size,
+               values_to = "value",
+               names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "MAE")
+
+
+show_best(xgb_tuned_results_test, "mae")
+
+
+best_mae <- select_best(xgb_tuned_results_test, "mae")
+best_mae
+
+# Other option:
+# select parsimonious params within one SE of best model
+best_xgb_params <- xgb_tuned_results_test %>%
+  select_by_one_std_err(metric = "mae", maximize = FALSE, tree_depth) 
+
+best_xgb_params_rmse <- xgb_tuned_results_test %>%
+  select_by_one_std_err(metric = "rmse", maximize = FALSE, tree_depth) 
+```
+
+Finalize parameters
+```{r}
+final_xgb_slopes <- finalize_workflow(
+  xgb_wf_slopes,
+  best_mae
+)
+
+final_xgb_slopes
+
+
+fit_workflow_slopes<- fit(final_xgb_slopes, slopes_train_prep)
+
+
+# check importance 
+final_xgb_slopes %>%
+  fit(data = slopes_train_prep) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point") 
+```
+
+
+```{r}
+
+final_res <- last_fit(final_xgb_slopes, slopes_split)
+
+collect_metrics(final_res)
+```
+
+```{r}
+# three different save formats just in case
+# 1. Rds
+save(fit_workflow_slopes, file = "fit_workflow_slopes.rds")
+# 2. rda
+save(fit_workflow_slopes, file = "fit_workflow_slopes.rda")
+# 3. raw xbg object, which can then be loaded with xgb.load
+slopes_model_obj<- fit_workflow_slopes$fit$fit$fit
+xgb.save(slopes_model_obj, "slopes_model_obj")
+
+
+save(final_xgb_slopes, file = "final_xgb_slopes.rds")
+
+```
+# After reloading
+```{r}
+vi_slopes <- vi(fit_workflow_slopes) 
+
+
+
+save(vi_slopes, file = "vi_slopes.csv")
+
+```

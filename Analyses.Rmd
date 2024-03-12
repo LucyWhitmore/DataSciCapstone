@@ -1,0 +1,279 @@
+---
+title: "Analyses"
+author: "Lucy Whitmore"
+date: "3/11/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+packages <-  c("tidyverse",
+               "ggpubr", "tidymodels", "xgboost", "caret")
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))  
+}
+lapply(packages, library, character.only = TRUE)
+```
+
+Load files
+```{r}
+slopes_pred_elastic <- as.data.frame(rio::import("~/Documents/DataSciCapstone/slopes_pred_elastic.Rda"))
+
+annualized_pred_elastic <- as.data.frame(rio::import("~/Documents/DataSciCapstone/annualized_pred_elastic.Rda"))
+
+
+#xgb_annualized <- rio::import("xgb_annualized.rds")
+xgb_slopes <- rio::import("xgb_slopes.rds")
+
+fit_workflow_annualized <- rio::import("fit_workflow_annualized.rda")
+
+fit_workflow_slopes <- rio::import("fit_workflow_slopes.rda")
+```
+
+
+Plots of predictions - Elastic Net
+```{r}
+# Random Slopes - Elastic Net
+elastic_slope_pred_plot <- ggscatter(slopes_pred_elastic, x="V1", y = "predict_te_elastic_slopes", xlab= "Chronological Age", ylab = "Predicted Age", color = "#44AA99", alpha=.6, title = "Elastic Net - Random Slopes")
+
+# Annualized Change - Elastic Net
+elastic_annualized_pred_plot <- ggscatter(annualized_pred_elastic, x="V1", y = "predict_te_elastic_annualized", xlab= "Chronological Age", ylab = "Predicted Age", color = "#CC6677", alpha=.6, title = "Elastic Net - Annualized Change")
+```
+
+Get XGBoost predictions
+```{r}
+xgb_annualized_pred <-
+  fit_workflow_annualized %>%
+  predict(new_data = annualized_test) #%>%
+#  mutate(
+    # provide the chronological age at time of scan
+#    truth = analysis_sample_baseline$interview_age
+ # ) %>%
+  # compute the brain age gap by subtracting chronological age from prediction
+#  mutate(gap = .pred - truth)
+
+xgb_annualized_pred <- cbind.data.frame(xgb_annualized_pred, annualized_test$interview_age_y4)
+
+
+
+xgb_slopes_pred <-
+  fit_workflow_slopes %>%
+  predict(new_data = slopes_test)
+
+xgb_slopes_pred <- cbind.data.frame(xgb_slopes_pred, slopes_test$interview_age)
+```
+
+
+Plots for XGBoost Model Predictions
+```{r}
+xgb_annualized_pred_plot <- ggscatter(xgb_annualized_pred, x="annualized_test$interview_age_y4", y = ".pred", xlab= "Chronological Age", ylab = "Predicted Age", color = "#88CCEE", alpha=.6, title = "XGBoost - Annualized Change")
+
+# Annualized Change - Elastic Net
+xgb_slope_pred_plot <-ggscatter(xgb_slopes_pred, x="slopes_test$interview_age", y = ".pred", xlab= "Chronological Age", ylab = "Predicted Age", color = "#882255", alpha=.6, title = "XGBoost - Random Slopes")
+
+ggarrange(elastic_annualized_pred_plot, elastic_slope_pred_plot, xgb_annualized_pred_plot, xgb_slope_pred_plot,
+          labels = c("A", "B", "C", "D"),
+          ncol = 2, nrow = 2)
+
+ggsave(filename = "model_predictions.png",
+                          width=10, height=10, units='in', dpi=300)
+```
+ggseg importance plots
+```{r}
+# maybe just the best model
+
+slopes_vi<- vi(elastic_slopes)
+save(slopes_vi, file="slopes_vi.csv")
+
+
+brain_labels(dk)
+brain_labels(aseg)
+
+
+
+# select only name and atlas name, then join with new vip estimates to get around renaming by hand
+vi_renamed <- rio::import("slopes_vi.csv") %>% 
+ select(Variable, brain_labels_dk, aseg_label, Importance)
+
+
+#check labels
+brain_labels(dk)
+brain_labels(aseg)
+
+
+#Cortical - Volume
+dk_vi_vol <- vi_renamed%>%
+  filter(grepl('vol', Variable)) %>% 
+  rename(label = brain_labels_dk) %>% 
+  filter(label != "") %>% 
+  select(Importance, label)
+
+dk_vi_vol <- data.frame(dk_vi_vol)
+
+dk_vol_importance <- ggplot(dk_vi_vol) +
+  geom_brain(atlas = dk, position = position_brain(hemi ~ side), aes(fill = Importance))+
+  theme_void() +
+ # scale_fill_viridis_d()+
+  scale_fill_gradient(low = '#e0ecf4', high = '#8856a7', limits=c(0,100), breaks=c(0,50, 100)) +
+  labs(title = "Cortical Volume")
+
+#cvd_grid(dk_vol_importance)
+
+#ggsave(filename="dk_vol_importance.png",
+#                         width=8, height=4, units='in', dpi=300)
+
+
+
+#Cortical - Area
+dk_vi_area <- vi_renamed %>%
+  filter(grepl('area', Variable)) %>% 
+  rename(label = brain_labels_dk) %>% 
+  filter(label != "") %>% 
+  select(Importance,label)
+
+dk_vi_area <- data.frame(dk_vi_area)
+
+dk_area_importance <- ggplot(dk_vi_area) +
+  geom_brain(atlas = dk, position = position_brain(hemi ~ side), aes(fill = Importance))+
+  theme_void() +
+  scale_fill_gradient(low = '#e0ecf4', high = '#8856a7', limits=c(0,100), breaks=c(0,50, 100)) +
+  labs(title = "Cortical Area")
+
+#ggsave(filename="dk_area_importance.png",
+#                         width=8, height=4, units='in', dpi=300)
+
+
+
+
+#Subcortical
+aseg_vi <- abcd_vi %>%
+  filter(label != "") %>% 
+  select(Importance,label)
+
+aseg_vi <- vi_renamed %>%
+  rename(label = aseg_label) %>% 
+  filter(label != "") %>% 
+  select(Importance,label)
+
+aseg_vi <- data.frame(aseg_vi)
+
+  
+aseg_importance_coronal <- ggplot(aseg_vi) +
+  geom_brain(atlas = aseg, side="coronal", aes(fill = Importance))+
+  theme_void() +
+  scale_fill_gradient(low = '#e0ecf4', high = '#8856a7', limits=c(0,100), breaks=c(0,50, 100)) +
+  labs(title = "Subcortical Volume - Coronal")
+
+#ggsave(filename="aseg_importance_coronal.png",
+#                          width=7, height=4, units='in', dpi=300)
+
+
+aseg_importance_sagittal <- ggplot(aseg_vi) +
+  geom_brain(atlas = aseg, side="sagittal", aes(fill = Importance))+
+  theme_void() +
+  scale_fill_gradient(low = '#e0ecf4', high = '#8856a7', limits=c(0,100), breaks=c(0,50, 100))  +
+  labs(title = "Subcortical Volume - Saggittal")
+
+#ggsave(filename="aseg_importance_sagittal.png",
+#                          width=7, height=4, units='in', dpi=300)
+
+
+# make one aseg figure
+aseg_importance <- ggarrange(aseg_importance_coronal, aseg_importance_sagittal, 
+          ncol = 1, nrow = 2)
+
+
+# Save as final figure
+ggarrange(dk_vol_importance, dk_area_importance, aseg_importance_coronal, aseg_importance_sagittal, 
+          labels = c("A", "B", "C", "D"),
+          ncol = 2, nrow = 2)
+ggsave(filename = "slope_importance.png",
+                        width=8, height=8, units='in', dpi=300)
+```
+
+variable importance graphs
+```{r}
+# Annualized Elastic Net
+vip(elastic_annualized, 
+    num_features = 20, 
+    geom = "point") + 
+theme_minimal()
+
+# Slopes Elastic Net
+vip(elastic_slopes, 
+    num_features = 20, 
+    geom = "point") + 
+theme_minimal()
+
+vi(elastic_slopes, num_features=10)
+
+
+# XGBoost Annualized
+xgb_annualized %>%
+  fit(data = annualized_train_prep) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point", num_features = 20) + 
+theme_minimal()
+
+# XGBoost Slopes
+xgb_slopes %>%
+  fit(data = slopes_train_prep) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point", num_features = 20) + 
+theme_minimal()
+
+
+#xgb.importance(model = extract_fit_parsnip(xgb_annualized))
+#xgb.importance(model = fit_workflow_annualized)
+#xgb.importance(model = extract_fit_parsnip(fit_workflow_annualized))
+#xgb.plot.importance(xgb.importance(model = fit_workflow_annualized$fit$fit$fit))
+#xgb.importance(model = fit_workflow_annualized$fit$fit$fit)
+```
+
+rank order variable importance
+```{r}
+
+# Elastic Slopes vs Elastic Annual
+annualized_vi<- vi(elastic_annualized)
+
+xgb_slope_vi <- xgb_slopes %>%
+  fit(data = slopes_train_prep) %>%
+  pull_workflow_fit() %>%
+  vi()
+
+xgb_annualized_vi <- xgb_annualized %>%
+  fit(data = annualized_train_prep) %>%
+  pull_workflow_fit() %>%
+  vi()
+
+# use rank(function)
+
+# Create dataframes w/ importance for both change score approaches
+slope_vis <- rbind.data.frame(slopes_vi %>% mutate(model = 1, rank=rank(Importance)), xgb_slope_vi %>% mutate(model = 2, rank=rank(Importance)))
+
+annualized_vis <- rbind.data.frame(annualized_vi %>% mutate(model = 1, rank=rank(Importance)), 
+                                xgb_annualized_vi %>% mutate(model = 2, rank=rank(Importance)))
+
+save(slope_vis, file="slope_vis.rds")
+save(annualized_vis, file="annualized_vis.rds")
+
+# Plots for both
+ggplot(slope_vis, aes(x=model, y = rank, group = Variable, color=Variable)) + 
+  geom_line(alpha=.8) +
+  scale_x_continuous(name = "Model", labels = c("1" = "Elastic Net", "2" = "XGBoost"), breaks= c(1,2)) +
+  gghighlight::gghighlight(rank>177, use_direct_label = FALSE)+
+  ggtitle("Random Slopes") +
+  theme_minimal()
+
+ggplot(annualized_vis, aes(x=model, y = rank, group = Variable, color = Variable)) + 
+  geom_line(alpha=.8) +
+  scale_x_continuous(name = "Model", labels = c("1" = "Elastic Net", "2" = "XGBoost"), breaks= c(1,2)) +
+  gghighlight::gghighlight(rank>361, use_direct_label = FALSE)+
+  ggtitle("Annualized Change") +
+  theme_minimal()
+
+# check ggrepel instead
+```
+
+

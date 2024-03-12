@@ -8,13 +8,14 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
-library(dplyr)
 
-library(nlme)
+packages <-  c("tidyverse", "tidymodels", "nlme","broom")
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))  
+}
+lapply(packages, library, character.only = TRUE)
 
-library(broom)
 
-library(stringr)
 ```
 
 # Import data, select for recommended inclusion, join
@@ -279,39 +280,81 @@ nrow(smri_difference_y2_y4_scaled)
 nrow(ranef_df)
 ```
 
-## Limit to same participants in both data sets
+## Limit to same participants in both data sets & join both waves?
 ```{r}
+smri_difference_baseline_y2_scaled  <- rio::import("/Volumes/devbrainlab/Lucy/BrainAGE/ChangeScoresCapstone/smri_difference_baseline_y2_scaled.Rda")
+
+smri_difference_y2_y4_scaled <- rio::import("/Volumes/devbrainlab/Lucy/BrainAGE/ChangeScoresCapstone/smri_difference_y2_y4_scaled.Rda")
+
 # filter annualized change for IDs in random slope
-smri_difference_baseline_y2_scaled %>% 
-  filter(src_subject_id %in% ranef_df$src_subject_id)
+smri_difference_baseline_y2_scaled  <- smri_difference_baseline_y2_scaled %>% 
+  filter(src_subject_id %in% slopes_df$src_subject_id)
 
 
-smri_difference_y2_y4_scaled %>% 
-  filter(src_subject_id %in% ranef_df$src_subject_id)
+smri_difference_y2_y4_scaled <- smri_difference_y2_y4_scaled %>% 
+  filter(src_subject_id %in% slopes_df$src_subject_id)
+
+
+# Join both waves together
+# probably mutate names first to tell apart
+colnames(smri_difference_baseline_y2_scaled)[c(2, 4:length(smri_difference_baseline_y2_scaled))] <- paste(colnames(smri_difference_baseline_y2_scaled)[c(2, 4:length(smri_difference_baseline_y2_scaled))], "y2", sep = "_")
+
+colnames(smri_difference_y2_y4_scaled)[c(2, 4:length(smri_difference_y2_y4_scaled))] <- paste(colnames(smri_difference_y2_y4_scaled)[c(2, 4:length(smri_difference_y2_y4_scaled))], "y4", sep = "_")
+
+
+annualized_change <- left_join(smri_difference_baseline_y2_scaled %>% select(-c("interview_age_diff_y2", "interview_age_y2")), smri_difference_y2_y4_scaled  %>% select(-c("interview_age_diff_y4")), by = c("src_subject_id", "rel_family_id")) %>% 
+  relocate(interview_age_y4, .before = smri_area_cdk_banksstslh_diff_y2)
+
+save(annualized_change, file="annualized_change.Rda")
 
 ```
 
-## Split for train/test
+## Split for train/test (slopes)
 ```{r}
 # set seed
 # make sure siblings are put into same split
 # need to import family info
 
 # check to see what max number of people per group is
-
-ranef_df %>% group_by(rel_family_id) %>% mutate(count = n())
+slopes_df %>% count(rel_family_id)
 # probably graph distribution
 
-set.seed()
+set.seed(42)
 
-ranef_split <- group_initial_split(
-  ranef_df,
+slopes_split <- group_initial_split(
+  slopes_df,
   group = rel_family_id,
-  prop = 0.80,
+  prop = 0.80 #,
   # matching age distributions across train and test set
-  strata = "interview_age"
+ # strata = "interview_age"
 )
 
-ranef_train <- training(ranef_split)
-ranef_validation <- testing(ranef_split)
+slopes_train <- training(slopes_split)
+slopes_test <- testing(slopes_split)
+
+# graph age distribution of both splits
+hist(slopes_train$interview_age, breaks = 5)
+hist(slopes_test$interview_age, breaks = 5)
+
+t.test(slopes_train$interview_age, slopes_test$interview_age)
+
+
+
+save(slopes_train, file="slopes_train.Rda")
+save(slopes_test, file="slopes_test.Rda")
+
 ```
+
+## Split for train/test (annualized change)
+```{r}
+
+annualized_train <- annualized_change %>% 
+  filter(src_subject_id %in% slopes_train$src_subject_id)
+  
+annualized_test <- annualized_change %>% 
+  filter(src_subject_id %in% slopes_test$src_subject_id)
+
+save(annualized_train, file="annualized_train.Rda")
+save(annualized_test, file="annualized_test.Rda")
+```
+
