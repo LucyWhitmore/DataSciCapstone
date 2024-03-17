@@ -81,7 +81,7 @@ ggsave(filename = "model_predictions.png",
 ```
 ggseg importance plots
 ```{r}
-# maybe just the best model
+# for manuscript main text, include only best model
 
 slopes_vi<- vi(elastic_slopes)
 save(slopes_vi, file="slopes_vi.csv")
@@ -91,8 +91,7 @@ brain_labels(dk)
 brain_labels(aseg)
 
 
-
-# select only name and atlas name, then join with new vip estimates to get around renaming by hand
+# load renamed variable importance measures (manually renamed to match ggseg package atlas)
 vi_renamed <- rio::import("slopes_vi.csv") %>% 
  select(Variable, brain_labels_dk, aseg_label, Importance)
 
@@ -223,12 +222,6 @@ xgb_slopes %>%
   vip(geom = "point", num_features = 20) + 
 theme_minimal()
 
-
-#xgb.importance(model = extract_fit_parsnip(xgb_annualized))
-#xgb.importance(model = fit_workflow_annualized)
-#xgb.importance(model = extract_fit_parsnip(fit_workflow_annualized))
-#xgb.plot.importance(xgb.importance(model = fit_workflow_annualized$fit$fit$fit))
-#xgb.importance(model = fit_workflow_annualized$fit$fit$fit)
 ```
 
 rank order variable importance
@@ -276,4 +269,88 @@ ggplot(annualized_vis, aes(x=model, y = rank, group = Variable, color = Variable
 # check ggrepel instead
 ```
 
+Puberty analyses
+```{r}
+# calculate gap from elastic net slopes predictions
+slopes_pred_elastic <- slopes_pred_elastic %>% 
+  mutate(gap = predict_te_elastic_slopes - V1)
 
+slopes_test <- rio::import("~/Documents/DataSciCapstone/Data/slopes_test.Rda") %>% 
+  select(src_subject_id)
+
+slope_gaps <- cbind(slopes_test, slopes_pred_elastic)
+
+# import
+# calculate mean puberty
+# attach to gap estimates
+pds_y <- rio::import("~/Data/ph_y_pds.csv")
+
+pds_y <- pds_y %>% 
+  select(1:12) %>% 
+  mutate_at(c(3:12), as.numeric)
+  
+# convert refuse to answer and don't know to NAs
+pds_y[pds_y == 777] <- NA
+pds_y[pds_y == 999] <- NA
+  
+
+# sex only recorded at baseline - need to pull that out
+pds_y_sex <- pds_y %>% 
+  filter(eventname == "baseline_year_1_arm_1") %>% 
+  select(src_subject_id, pds_sex_y) %>% 
+  rename(sex_y = pds_sex_y)
+  
+pds_y4<- pds_y %>% 
+  filter(eventname == "4_year_follow_up_y_arm_1") %>% 
+  select(-pds_sex_y)
+
+# attach sex variable to PDS values
+pds_y4 <- left_join(pds_y4, pds_y_sex) 
+
+# Calculate puberty score
+pds_calculated <- pds_y4 %>% 
+  mutate(youth_sum = case_when(sex_y == "1" ~ #male
+                           (pds_ht2_y + pds_bdyhair_y + pds_skin2_y + pds_m4_y + pds_m5_y),  
+                         sex_y == "2" ~ #female
+                           (pds_ht2_y + pds_bdyhair_y + pds_skin2_y + pds_f4_2_y + pds_f5_y))) %>% 
+  mutate(youth_mean = youth_sum/5)  %>% 
+  select(src_subject_id, sex_y, youth_sum, youth_mean) 
+  
+
+slope_gaps_pds<- left_join(slope_gaps, pds_calculated)
+
+## ANALYSES
+
+# linear regression 
+summary(lm(gap ~ youth_mean, data = slope_gaps_pds))
+
+# correlation
+cor(slope_gaps_pds$gap, slope_gaps_pds$youth_mean, use="complete.obs")
+
+
+sum(is.na(slope_gaps_pds$youth_mean))
+
+## FIGURES
+
+# Distribution Plot
+categorical_pds <-  slope_gaps_pds %>% 
+  mutate(youth_pds_cat=cut(youth_mean, breaks=c(-Inf, 1, 2, 3, Inf), labels=c("1","2","3", "4")))
+         
+
+ggpar((categorical_pds %>% 
+  filter(!is.na(youth_pds_cat)) %>% 
+  ggdensity(x = "gap", color= "youth_pds_cat", fill= "youth_pds_cat", add="mean", palette = c("#44AA99", "#CC6677", "#88CCEE","#882255"))),  #,'#526D37'
+  xlab="Brain Age Gap", ylab="Density", legend.title = "Youth-Report PDS", font.legend = 8) +
+  theme(text = element_text(size = 12)) 
+ 
+
+# Scatter Plot        
+ggplot(slope_gaps_pds, aes(x= gap, y = youth_mean)) +
+  geom_jitter(color = '#8856a7') +
+  theme_minimal()
+
+ggplot(categorical_pds %>% filter(!is.na(youth_mean)), aes(x= gap, y = youth_mean, colour = youth_pds_cat )) +
+  geom_jitter() + #color = c("#44AA99", "#CC6677", "#88CCEE","#882255")
+  theme_minimal()
+         
+```
