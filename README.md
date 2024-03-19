@@ -18,4 +18,4 @@ Analyses.Rmd - analyses & figures
 Manuscript.pdf - write-up of results
 
 
-longCombat5pt0.R - script for harmonizing multisite data (no longer used for final version)
+longCombat5pt0.R - script for harmonizing multisite data (not used for final version)
