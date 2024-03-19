@@ -1,0 +1,1 @@
+Modeling & analysis scripts related to my capstone project for EDLD 640/Specialization in Educational Data Science. This project investigates different strategies for creating BrainAGE models based on changes in brain measures during adolescence. 
