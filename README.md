@@ -15,7 +15,7 @@ UnharmonizedDataCleaning.Rmd - data cleaning/setup
 
 Analyses.Rmd - analyses & figures
 
-Manuscript.pdf - write-up of results
+CapstoneManuscript.pdf - write-up of results
 
 
 longCombat5pt0.R - script for harmonizing multisite data (not used for final version)
