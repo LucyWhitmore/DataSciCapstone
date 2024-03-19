@@ -3,13 +3,19 @@ Modeling & analysis scripts related to my capstone project for EDLD 640/Speciali
 
 # Modeling Files:
 ModelTraining.Rmd - slope change, elastic net approach
+
 ModelTrainingAnnualized.Rmd - annualized change, elastic net approach
+
 xgboost_ModelTrainingSlopes.Rmd - slope change, XGBoost approach
+
 xgboost_ModelTrainingAnnualized.Rmd - annualized change, XGBoost approach
 
 # Other Files:
 UnharmonizedDataCleaning.Rmd - data cleaning/setup 
+
 Analyses.Rmd - analyses & figures
+
 Manuscript.pdf - write-up of results
+
 
 longCombat5pt0.R - script for harmonizing multisite data (no longer used for final version)
